@@ -4,6 +4,7 @@
 import type { Request, Response } from "express";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createMocks } from "node-mocks-http";
+import type Stripe from "stripe";
 import { describe, expect, beforeEach } from "vitest";
 
 import { WEBAPP_URL } from "@calcom/lib/constants";
@@ -30,8 +31,10 @@ import {
   MockError,
   mockPaymentApp,
 } from "@calcom/web/test/utils/bookingScenario";
+import { handlePaymentSuccess } from "@calcom/features/ee/payments/api/webhook";
 
 type CustomNextApiRequest = NextApiRequest & Request;
+
 type CustomNextApiResponse = NextApiResponse & Response;
 // Local test runs sometime gets too slow
 const timeout = process.env.CI ? 5000 : 20000;
@@ -39,6 +42,7 @@ describe.sequential("handleNewBooking", () => {
   beforeEach(() => {
     // Required to able to generate token in email in some cases
     process.env.CALENDSO_ENCRYPTION_KEY = "abcdefghjnmkljhjklmnhjklkmnbhjui";
+    process.env.STRIPE_WEBHOOK_SECRET = "MOCK_STRIPE_WEBHOOK_SECRET";
     mockNoTranslations();
     mockEnableEmailFeature();
     globalThis.testEmails = [];
@@ -141,15 +145,14 @@ describe.sequential("handleNewBooking", () => {
         expectWorkflowToBeTriggered();
 
         const testEmails = emails.get();
-        expect(testEmails[0]).toHaveEmail({
+        expect(testEmails).toHaveEmail({
           htmlToContain: "<title>confirmed_event_type_subject</title>",
           to: `${organizer.email}`,
-        });
-        expect(testEmails[1]).toHaveEmail({
+        }, `${organizer.email}`);
+        expect(testEmails).toHaveEmail({
           htmlToContain: "<title>confirmed_event_type_subject</title>",
           to: `${booker.name} <${booker.email}>`,
-        });
-        expect(testEmails[1].html).toContain("<title>confirmed_event_type_subject</title>");
+        }, `${booker.name} <${booker.email}>`);
         expectWebhookToHaveBeenCalledWith("http://my-webhook.example.com", {
           triggerEvent: "BOOKING_CREATED",
           payload: {
@@ -270,15 +273,15 @@ describe.sequential("handleNewBooking", () => {
         expectWorkflowToBeTriggered();
 
         const testEmails = emails.get();
-        expect(testEmails[0]).toHaveEmail({
+        expect(testEmails).toHaveEmail({
           htmlToContain: "<title>event_awaiting_approval_subject</title>",
           to: `${organizer.email}`,
-        });
+        }, `${organizer.email}`);
 
-        expect(testEmails[1]).toHaveEmail({
+        expect(testEmails).toHaveEmail({
           htmlToContain: "<title>booking_submitted_subject</title>",
           to: `${booker.email}`,
-        });
+        }, `${booker.email}`);
 
         expectWebhookToHaveBeenCalledWith("http://my-webhook.example.com", {
           triggerEvent: "BOOKING_REQUESTED",
@@ -305,7 +308,7 @@ describe.sequential("handleNewBooking", () => {
       timeout
     );
 
-    test.only(
+    test(
       `should submit a booking request for a paid event
       1. Should create a booking in the database with status PENDING
       2. Should send emails to the booker as well as organizer for Payment request and awaiting approval
@@ -377,17 +380,21 @@ describe.sequential("handleNewBooking", () => {
             },
           ],
           organizer,
-          apps: [TestData.apps["google-calendar"], TestData.apps["daily-video"], TestData.apps["stripe-payment"]],
+          apps: [
+            TestData.apps["google-calendar"],
+            TestData.apps["daily-video"],
+            TestData.apps["stripe-payment"],
+          ],
         });
 
         mockSuccessfulVideoMeetingCreation({
           metadataLookupKey: "dailyvideo",
         });
 
-        const {paymentUid} = mockPaymentApp({
+        const { paymentUid, externalId } = mockPaymentApp({
           metadataLookupKey: "stripe",
-          appStoreLookupKey: "stripepayment"
-        })
+          appStoreLookupKey: "stripepayment",
+        });
 
         mockCalendarToHaveNoBusySlots("googlecalendar");
         createBookingScenario(scenarioData);
@@ -400,7 +407,7 @@ describe.sequential("handleNewBooking", () => {
 
         expect(createdBooking).toContain({
           location: "integrations:daily",
-          paymentUid: paymentUid
+          paymentUid: paymentUid,
         });
 
         expectBookingToBeInDatabase({
@@ -417,10 +424,10 @@ describe.sequential("handleNewBooking", () => {
 
         const testEmails = emails.get();
 
-        expect(testEmails[0]).toHaveEmail({
+        expect(testEmails).toHaveEmail({
           htmlToContain: "<title>awaiting_payment_subject</title>",
           to: `${booker.name} <${booker.email}>`,
-        });
+        }, `${booker.name} <${booker.email}>`);
 
         expectWebhookToHaveBeenCalledWith("http://my-webhook.example.com", {
           triggerEvent: "BOOKING_PAYMENT_INITIATED",
@@ -443,6 +450,23 @@ describe.sequential("handleNewBooking", () => {
             },
           },
         });
+
+        try {
+          await handlePaymentSuccess(
+            (function getStripePaymentEvent({ paymentIntentId }) {
+              return {
+                id: 1,
+                data: {
+                  object: {
+                    id: paymentIntentId,
+                  },
+                },
+              } as unknown as Stripe.Event;
+            })({ paymentIntentId: externalId })
+          );
+        } catch (e) {
+          expect(e.statusCode).toBeLessThan(300);
+        }
       },
       timeout
     );
@@ -579,16 +603,16 @@ describe.sequential("handleNewBooking", () => {
         await handleNewBooking(req);
 
         const testEmails = emails.get();
-
-        expect(testEmails[0]).toHaveEmail({
+        console.log('testEmails.length', testEmails.length)
+        expect(testEmails).toHaveEmail({
           htmlToContain: "<title>confirmed_event_type_subject</title>",
           to: `${organizer.email}`,
-        });
+        }, `${organizer.email}`);
 
-        expect(testEmails[1]).toHaveEmail({
+        expect(testEmails).toHaveEmail({
           htmlToContain: "<title>confirmed_event_type_subject</title>",
           to: `${booker.name} <${booker.email}>`,
-        });
+        }, `${booker.name} <${booker.email}>`);
 
         expectWebhookToHaveBeenCalledWith("http://my-webhook.example.com", {
           triggerEvent: "BOOKING_CREATED",
